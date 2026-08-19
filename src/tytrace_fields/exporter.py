@@ -53,6 +53,11 @@ def _grid_geojson(
     unit: str,
     values: dict[str, np.ndarray],
 ) -> dict[str, Any]:
+    units = {name: unit for name in values}
+    if "precipitation" in values:
+        units["precipitation"] = "mm"
+    if "temperature" in values:
+        units["temperature"] = "°C"
     grid: dict[str, Any] = {
         "timestamp": timestamp,
         "bounds": bounds,
@@ -63,6 +68,7 @@ def _grid_geojson(
         "origin": "north-west",
         "order": "row-major",
         "unit": unit,
+        "units": units,
     }
     grid.update({name: value.ravel().tolist() for name, value in values.items()})
     return {"type": "FeatureCollection", "features": [], "grid": grid}
@@ -96,9 +102,13 @@ def export_typhoon(
     pressure_max = -np.inf
     wind_min = np.inf
     wind_max = -np.inf
+    precipitation_min = np.inf
+    precipitation_max = -np.inf
+    temperature_min = np.inf
+    temperature_max = -np.inf
 
     with Dataset(netcdf_path) as dataset:
-        required = {"valid_time", "latitude", "longitude", "msl", "u10", "v10"}
+        required = {"valid_time", "latitude", "longitude", "msl", "u10", "v10", "tp", "t2m"}
         missing = required.difference(dataset.variables)
         if missing:
             raise ValueError(f"NetCDF is missing variables: {', '.join(sorted(missing))}")
@@ -150,15 +160,35 @@ def export_typhoon(
                 target_latitudes,
                 target_longitudes,
             )
+            precipitation = bilinear_resample(
+                dataset.variables["tp"][index] * 1000.0,
+                source_latitudes,
+                source_longitudes,
+                target_latitudes,
+                target_longitudes,
+            )
+            temperature = bilinear_resample(
+                dataset.variables["t2m"][index] - 273.15,
+                source_latitudes,
+                source_longitudes,
+                target_latitudes,
+                target_longitudes,
+            )
             pressure = np.round(pressure, 1)
             u_wind = np.round(u_wind, 2)
             v_wind = np.round(v_wind, 2)
-            wind_speed = np.hypot(u_wind, v_wind)
+            wind_speed = np.round(np.hypot(u_wind, v_wind), 2)
+            precipitation = np.round(precipitation, 2)
+            temperature = np.round(temperature, 1)
 
             pressure_min = min(pressure_min, float(np.min(pressure)))
             pressure_max = max(pressure_max, float(np.max(pressure)))
             wind_min = min(wind_min, float(np.min(wind_speed)))
             wind_max = max(wind_max, float(np.max(wind_speed)))
+            precipitation_min = min(precipitation_min, float(np.min(precipitation)))
+            precipitation_max = max(precipitation_max, float(np.max(precipitation)))
+            temperature_min = min(temperature_min, float(np.min(temperature)))
+            temperature_max = max(temperature_max, float(np.max(temperature)))
             pressure_url = f"pressure/{filename}"
             wind_url = f"wind/{filename}"
             _atomic_json(
@@ -169,7 +199,11 @@ def export_typhoon(
                     target_latitudes,
                     target_longitudes,
                     "hPa",
-                    {"pressure": pressure},
+                    {
+                        "pressure": pressure,
+                        "precipitation": precipitation,
+                        "temperature": temperature,
+                    },
                 ),
             )
             _atomic_json(
@@ -180,7 +214,7 @@ def export_typhoon(
                     target_latitudes,
                     target_longitudes,
                     "m/s",
-                    {"u": u_wind, "v": v_wind},
+                    {"u": u_wind, "v": v_wind, "speed": wind_speed},
                 ),
             )
             frame_entries.append(
@@ -212,8 +246,17 @@ def export_typhoon(
             "min": round(float(wind_min), 2),
             "max": round(float(wind_max), 2),
         },
+        "precipitation": {
+            "unit": "mm",
+            "min": round(float(precipitation_min), 2),
+            "max": round(float(precipitation_max), 2),
+        },
+        "temperature": {
+            "unit": "°C",
+            "min": round(float(temperature_min), 1),
+            "max": round(float(temperature_max), 1),
+        },
         "frames": frame_entries,
     }
     _atomic_json(manifest_path, manifest)
     return ExportResult(typhoon, output_directory, len(frame_entries))
-
